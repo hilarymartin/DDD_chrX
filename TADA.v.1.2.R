@@ -1,3 +1,5 @@
+#### This script was written by the authors of TADA, not by Hilary Martin. It was obtained from http://www.compgen.pitt.edu/TADA/TADA_homepage.htm. It is included here since it is required by script5.run_TADA_to_do_per_gene_tests_on_males.R.
+
 #########################################################################################
 # This is a rewrite of the original TADA software (He et al 2015). It focus on the calculation of TADA test statistics, Pvalues, and Bayes Qvalues.
 # Many of the previous extraneous functions are no longer supported in this software but can be found in the original version on 
