@@ -1,0 +1,743 @@
+---
+title: "XChromosomeFertility"
+author: "Eugene Gardner"
+date: "30 July 2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+# 1. Startup and Introduction
+
+This document contains UKBB data and uses it to assess hemizgyous variant carriers against a variety of phenotypes. If using data produced by this repo, please cite [our manuscript](https://www.medrxiv.org/content/10.1101/2020.03.18.20037960v1).
+
+**Big Note**: The first part of this document involves running scripts to generate text files required for downstream analysis. _PLEASE_ start there and make sure all scripts ran successfully. All scripts for this section are available in the folder `./scripts/` and _will not_ run as part of this document.
+
+**Big Note**: You also need to have access to UKBiobank, but this script is agnostic to the UKBiobank application number. You should be able to download a bulk phenotype file and, if it contains the correct phenotypes as referred to in the manuscript and in the file `rawdata/phenofiles/fields_to_extract.txt`, you should be able to reproduce our data and figures. 
+
+You can view a compiled html version of this document with all code run either within this repository at `compiled_htmls/PhenotypeTesting.html` or on [github](https://htmlpreview.github.io/?https://github.com/hilarymartin/DDD_chrX/UKBB_Analysis/blob/master/compiled_html/PhenotypeTesting.html).
+
+## 1A. Libraries
+
+```{r setup}
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE ## Warnings turned off to squelch unecessary ggplot noise in kintted document. Have checked all for accuracy.
+)
+
+## Quietly Load Libraries
+load.package <- function(name) {
+  suppressMessages(suppressWarnings(library(name, quietly = T, warn.conflicts = F, character.only = T)))
+}
+
+load.package("biomaRt") ## Get gene lists we need
+load.package("readxl") ## Read Supplemental Excel tables
+load.package("data.table") ## Better than data.frame
+load.package("patchwork") ## Arranging ggplots
+load.package("broom") ## Makes getting covars out of lm much tidier
+load.package("meta") ## For doing meta analysis
+load.package("mratios") ## Need this to calculate 95% CIs for ratios of two means
+load.package("svglite") ## Need to create figures properly (ggsave doesn't like anything with an alpha)
+load.package("tidyverse") ## Takes care of ggplot, tidyr, dplyr, and stringr
+```
+
+## 1B. Themes
+
+Set themes for internal figures just for testing purposes:
+
+```{r Base Themes}
+theme <- theme(panel.background=element_rect(fill="white"),line=element_line(size=1,colour="black",lineend="round"),axis.line=element_line(size=1),text=element_text(size=16,face="bold",colour="black"),axis.text=element_text(colour="black"),axis.ticks=element_line(size=1,colour="black"),axis.ticks.length=unit(.1,"cm"),strip.background=element_rect(fill="white"),axis.text.x=element_text(angle=45,hjust=1),legend.position="blank",panel.grid.major=element_line(colour="grey",size=0.5))
+
+## Default theme w/legend
+theme.legend <- theme + theme(legend.position="right")
+
+## M/F Colour Scheme:
+male <- "#38BCA0"
+female <- "#7B06F8"
+
+sex.colours <- c(male, female)
+names(sex.colours) <- c("Male","Female")
+sex.colours.fill <- scale_fill_manual(name = "Sex",values=sex.colours,guide=guide_legend(reverse=F))
+sex.colours.colour <- scale_colour_manual(name = "Sex",values=sex.colours, guide=guide_legend(reverse=F))
+sex.colours.fill.rev <- scale_fill_manual(name = "Sex",values=sex.colours,guide=guide_legend(reverse=T))
+sex.colours.colour.rev <- scale_colour_manual(name = "Sex",values=sex.colours, guide=guide_legend(reverse=T))
+
+## Variant Colour Scheme:
+alt.colours <- c("#9AD7E5",
+                 "#D17A86",
+                 "#969FAD")
+```
+
+Theme for main text/supplemental figures (making font size smaller):
+
+```{r Figure Themes}
+theme.figures <- theme(panel.background=element_rect(fill="white"),line=element_line(size=1,colour="black",lineend="round"),axis.line=element_line(size=1),text=element_text(size=10,face="bold",colour="black"),axis.text=element_text(colour="black"),axis.ticks=element_line(size=1,colour="black"),axis.ticks.length=unit(.1,"cm"),strip.background=element_rect(fill="white"),axis.text.x=element_text(angle=45,hjust=1),legend.position="blank",panel.grid.major=element_line(colour="grey",size=0.5))
+
+## Default theme w/legend
+theme.figures.legend <- theme.figures + theme(legend.position="right")
+```
+
+## 1C. Prepping Storage Directories
+
+This just unpacks the tarball of provided data resources at `rawdata.tar.gz`
+
+```{bash Prepare Storage, eval = F}
+
+tar -zxf rawdata.tar.gz
+
+```
+
+# 2. Generating Required Text Files
+
+Example code for downloading and initial processing UKBB phenotype file. None of the code in this section will actually be run.
+
+## 2A. Creating Master Phenotype File:
+
+This code chunk is not evaluated here but is provided for replication purposes. This code chunk assumes that the user has already gained access to, and [downloaded](http://biobank.ndph.ox.ac.uk/showcase/), relevant phenotype fields and has aquired the encoded phenotype file (like ukb00000.enc). The tools used below are also available via the [UKBiobank datashowcase website](http://biobank.ndph.ox.ac.uk/showcase/download.cgi). More information on downloading can be found [here](https://biobank.ctsu.ox.ac.uk/~bbdatan/Accessing_UKB_data_v2.1.pdf).
+
+```{bash Get UKBB Phenotype File, eval = F}
+
+## First step involves downloading and decoding individual phenotype data. Keyvalue is the key provided via email when you apply for bulk download. This will create a decoded file ukb00000.enc_ukb
+ukbunpack ukb00000.enc <keyvalue>
+
+## Next, convert the file to a tab-delimited format:
+ukbconv ukb00000.enc_ukb txt
+
+## Create a data dictionary (so we know where phenotypes are in the file!)
+ukbconv ukb00000.enc_ukb docs
+
+## This should result in 2 required files for further processing:
+# ukb00000.txt
+# ukb00000.html
+```
+
+**Note** the following processing data expects the "ukb00000.*" data to be in the unpacked `rawdata/phenofiles/` directory!
+
+This code chunk extracts phenotypes of relevance from the master phenotype file that is downloaded and processed above. It is run with the script: `./scripts/extract_phenotypes.pl`.
+
+This script is slower than it should be due to an issue with text format encoding of the UKBB-created TSV file on MacOS. If running this code on a UNIX system, would suggest switching the 'exec' call at the bottom of this script to use cut for additional speed. It should mean the script executes in ~30s rather than 5mins.
+
+```{bash Extract Phenotypes, eval = F}
+
+./scripts/extract_phenotypes.pl
+
+```
+
+## 2B. Setting Unrelated Individuals:
+
+Again, this is just an example on how relatedness information is accquired from UKBB, code does not actually run. It proceeds in two basic steps:
+
+1. Download the relatedness file using the (ukbgene)[http://biobank.ndph.ox.ac.uk/showcase/refer.cgi?id=664] tool
+2. Place the file in `./rawdata/phenofiles/`
+3. Running the provided script to generate a list of individuals to filter - at: `./scripts/get_relateds.R`.
+
+```{bash Process Relatedness, eval = F}
+
+## 1. Run ukbgene rel. This will download a file like: ukbXXXXX_rel_sYYYYYY.dat, where X represents your application ID, and 488288 represents the file version
+ukbgene rel
+
+## 2. Get related individuals to filter (change the name of the .dat to your specific file):
+./scripts/get_relateds.R ukbXXXXX_rel_sYYYYYY.dat > raw_data/phenofiles/relateds.out
+## Format the output file to be readable by R
+perl -ne 'if ($_ =~ /\"(\d{7})\"/) {print "$1\n";}' raw_data/phenofiles/relateds.out > raw_data/phenofiles/relateds.txt
+
+```
+
+# 3. Phenotype Data
+
+Read in the master phenotype and related individuals file that was created in [the previous section](#2._generating_required_text_files)
+
+```{r Load Master Phenotype File}
+
+UKBB.raw.phenotypes <- fread("rawdata/phenofiles/ukbb_phenotypes.txt")
+UKBB.raw.phenotypes[,eid:=as.character(eid)]
+
+```
+
+```{r Load Relatedness File}
+
+related.individuals <- fread("rawdata/phenofiles/relateds.txt", header = F)
+setnames(related.individuals,"V1","eid")
+related.individuals[,eid:=as.character(eid)]
+
+```
+
+## 3A. Generic Phenotypes
+
+Grabbing generic phenotypes age, sex, ancestry, European ancestry status and adding them to the main UKBB.phenotype.data table.
+
+This also filters out individuals that are not broadly European.
+
+```{r Process Generic Phenotypes}
+
+## Data table of all UKBB population data:
+PCAs<-c(1:30)
+for (i in PCAs) {
+  PCAs[i] <- paste("22009-0",i,sep=".")
+}
+fields <- c("eid","22006-0.0","31-0.0","21022-0.0",PCAs)
+UKBB.phenotype.data <- UKBB.raw.phenotypes[,..fields]
+
+setnames(UKBB.phenotype.data,c(fields),c("eid","white.british.ancestry","sexPulse","agePulse","PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","PC17","PC18","PC19","PC20","PC21","PC22","PC23","PC24","PC25","PC26","PC27","PC28","PC29","PC30"))
+
+## Remove all non-white British (determined direct by UKBB and taken from the pheno file)
+UKBB.phenotype.data <- UKBB.phenotype.data[!is.na(white.british.ancestry)]
+paste0("Number of Broadly Euro Indiv: ", table(UKBB.raw.phenotypes[,`22006-0.0`]))
+
+## Remove all related individuals:
+UKBB.phenotype.data <- UKBB.phenotype.data[!eid %in% related.individuals[,eid]]
+
+## Change sex to be 1 = male, 2 = female instead of 0,1. 
+## This is a distinction made for an old project to keep it consistent.
+UKBB.phenotype.data[,sexPulse:=ifelse(sexPulse == 0, 2, 1)]
+
+## Add agePulse.squared covar:
+UKBB.phenotype.data[,agePulse.squared:=agePulse^2]
+paste0("Number of Individuals after filtering: ",nrow(UKBB.phenotype.data))
+
+rm(PCAs,fields,i)
+```
+
+## 3B. Fertility
+
+Interesting number of children. Just plotting Male vs Female for QC purposes (even though we're only intested in females in this document).
+
+```{r Fertility, fig.height=5, fig.width=4}
+
+fertility.metrics <- UKBB.raw.phenotypes[,c("eid",
+                                            "2405-0.0", ## Children Fathered
+                                            "2734-0.0" ## Live Births
+                                            )]
+
+## Replace all NAs with a double value to make filtering easier
+fertility.metrics[is.na(fertility.metrics)] <- -9
+
+setnames(fertility.metrics,names(fertility.metrics),c("eid",
+                                                      "children.fathered",
+                                                      "live.births"))
+                                                     
+# Number of live births:
+fertility.metrics[,live.births:=if_else(live.births > 7, -9, live.births)]
+fertility.metrics[,live.births:=if_else(live.births < 0, -9, live.births)]
+                    
+ggplot(fertility.metrics[live.births>=0],aes(live.births,..density..)) +
+  geom_histogram(binwidth = 1,colour="black",fill=female) +
+  xlab("Live Births") +
+  scale_y_continuous(name = "Proportion of Females", limits=c(0,0.5), labels = paste0(c(0,10,20,30,40,50),"%")) +
+  theme
+
+# Children fathered
+fertility.metrics[,children.fathered:=if_else(children.fathered > 7, -9, children.fathered)]
+fertility.metrics[,children.fathered:=if_else(children.fathered < 0, -9, children.fathered)]
+
+ggplot(fertility.metrics[children.fathered>=0],aes(children.fathered,..density..)) +
+  geom_histogram(binwidth = 1,colour="black",fill=male) +
+  xlab("Children Fathered") +
+  scale_y_continuous(name = "Proportion of Males", limits=c(0,0.5), labels = paste0(c(0,10,20,30,40,50),"%")) +
+  theme
+
+## Now convert all the -9s back to NA
+fertility.metrics <- fertility.metrics[,c("eid","children.fathered","live.births")]
+fertility.metrics[,children.fathered:=if_else(children.fathered==-9,as.numeric(NA),children.fathered)]
+fertility.metrics[,live.births:=if_else(live.births==-9,as.numeric(NA),live.births)]
+
+UKBB.phenotype.data <- merge(UKBB.phenotype.data,fertility.metrics,by="eid")
+rm(fertility.metrics)
+```
+
+## 3C. Fluid Intelligence
+
+This section looks at UKBB "Fluid Intelligence". 
+
+The field of relevance for us is 20016-0.0. There is no array data (only 1 test was done, but 3 instances - we're using instance 0).
+
+```{r Fluid Intelligence}
+
+## Grab fluid intel from the raw phenotypes:
+fluid.intel.table <- UKBB.raw.phenotypes[,c("eid","20016-0.0")]
+fluid.intel.table[,fluid.intel:=if_else(is.na(`20016-0.0`),as.integer(NA),`20016-0.0`)]
+ggplot(merge(UKBB.phenotype.data,fluid.intel.table,by="eid"),aes(fluid.intel,group=as.factor(sexPulse),fill=as.factor(sexPulse))) +
+  geom_histogram(binwidth = 1, position="identity", alpha = 0.5) +
+  scale_alpha_continuous(range=c(0,1)) +
+  scale_fill_manual(values=c(male,female),guide=guide_legend(title="Sex"),labels=c("Male","Female")) +
+  scale_x_continuous(name="Fluid Intel Score") +
+  scale_y_continuous(name = "# of Individuals") +
+  theme.legend
+
+## Normalize fluid intelligence
+fluid.intel.table[,fluid.intel:=(fluid.intel-mean(fluid.intel,na.rm=T))/sd(fluid.intel,na.rm=T)]
+ggplot(merge(UKBB.phenotype.data,fluid.intel.table,by="eid"),aes(fluid.intel,group=as.factor(sexPulse),fill=as.factor(sexPulse))) +
+  geom_histogram(binwidth = 1, position="identity", alpha = 0.5) +
+  scale_alpha_continuous(range=c(0,1)) +
+  scale_fill_manual(values=c(male,female),guide=guide_legend(title="Sex"),labels=c("Male","Female")) +
+  scale_x_continuous(name="Normalized Fluid Intel Score") +
+  scale_y_continuous(name = "# of Individuals") +
+  theme.legend
+
+## Merge with remaining phenotypes
+UKBB.phenotype.data <- merge(UKBB.phenotype.data,fluid.intel.table[,c("eid","fluid.intel")],by="eid",all.x=T)
+
+rm(fluid.intel.table)
+```
+
+# 4. Assembling Sequencing/Array Data
+
+## 4A. Load Gene Lists For Phenotype Testing
+
+We have provided in this document our gene lists that we have used for our association testing 
+
+### Generic Lists
+
+This code block just loads our generic lists that we created above, namely:
+
+1. Our hg19 -> hg38 conversion table
+
+```{r Load Generic Lists}
+
+## Load gene translation file
+gene.translate <- fread("rawdata/genelists/hg38_to_hg19_ENSG.txt", header=F)
+setnames(gene.translate,names(gene.translate),c("hg38.GENE","hg19.GENE"))
+
+## Generate gene lists for phenotype testing:
+
+## hemizygous gene lists:
+gene.lists=c("hemizygous_DD_genes.ENSG.txt",
+             "hemizygous_DD_genes_affecting_brain_with_LoF_mechanism.ENSG.txt",
+             "hemizygous_DD_genes_affecting_brain.ENSG.txt",
+             "hemizygous_DD_genes_consensus.ENSG.txt"
+             )
+
+names(gene.lists)=gsub(".txt","",basename(gene.lists))
+names(gene.lists)=gsub(".ENSG","",names(gene.lists))
+gene.lists <- as.list(gene.lists)
+
+## Now make a vector of each gene list while getting rid of genes missing from Hg38:
+for (g in names(gene.lists)) {
+  
+  file <- paste0("rawdata/genelists/",get(g,gene.lists))
+  current.genes <- fread(file,header=F)
+  current.genes <- current.genes[,V1]
+  current.genes <- current.genes[current.genes %in% gene.translate[,hg19.GENE]]
+  gene.lists[g] = list(current.genes)
+  
+}
+```
+
+## 4B. Variant Data
+
+### SNV Data
+
+#### Downloading Requisite Data From UKBB
+
+Section tbd, but need to make sure to get two files:
+
+1. Variant calls themselves: `rawdata/snvresources/counts.ukbb_wes.txt`
+2. Field of 'has wes' from our derived data. I have already created a fake version at `rawdata/snvresources/has_exome.txt`
+
+This data is not going to be available until final publication of the manuscript. This is due to guidelines from UK Biobank that do not allow returned data fields for studies not yet through peer review. We cannot make these calls available as part of this repository due to patient/subject protection.
+
+```{bash Get SNVs, eval = F}
+
+
+
+```
+
+#### Annotating Rare Variants in UKBB
+
+SNV and InDel annotation is handled by the document `SNVCalling_Filtering.Rmd` within this repository. Please see that document for details on how to perform SNV QC and annotation.
+
+#### Build Data Files
+
+This section does the actual loading of UKBB SNV data into R.
+
+```{r Load SNV Data}
+
+load.data <- function(counts.file, 
+                      samples.file, 
+                      indv.to.keep) {
+  
+  ## Read the counts file:
+  variant.counts <- fread(counts.file)
+  setnames(variant.counts,names(variant.counts),c("eid","gt","chr","pos","ref","alt","CADD","MPC","gnomadAF","VQSR","PEXT","CSQ","UKBB.AC","AN","UKBB.AF","AP","GENE","last_exon","last_intron"))
+  
+  ## Fix the sample IDs, which have a '_' in them. Have to do it this way otherwise it's insanely slow:
+  ids <- unique(variant.counts[,c("eid")])
+  ids[,eid.split:=str_split_fixed(eid,pattern = "_",n = 2)[1],by=1:nrow(ids)]
+  variant.counts <- merge(variant.counts,ids,by="eid")
+  variant.counts[,eid:=eid.split]
+  variant.counts[,eid.split:=NULL]
+  
+  ## Set a variable in the table for SNV or INDEL
+  variant.counts[,allele.type:=ifelse(nchar(ref)==nchar(alt),"SNV","INDEL")]
+  
+  ## Set gnomadAF to 0 if it was not found for a particular variant
+  variant.counts[,gnomadAF:=ifelse(is.nan(gnomadAF),0,gnomadAF)]
+  
+  ## Need this because some samples might have 0 variants. (SYN should always have some...?)
+  ## Will load a list of samples that we should expect to have and attaches the phenotype ID to them
+  final.samples <- fread(samples.file)
+  final.samples <- final.samples[has.exome==1]
+  final.samples[,eid:=as.character(eid)]
+  
+  # Exclude/Include individuals/variants based on ancestry and relatedness
+  variant.counts <- variant.counts[eid %in% indv.to.keep]
+  final.samples <- final.samples[eid %in% indv.to.keep,c("eid")]
+  
+  ###!! FILTERING !!###
+  ## Filter by CADD & MPC:
+  variant.counts <- variant.counts[((CSQ == "LOF_HC" | (CSQ == "MIS" & MPC > 2)) & CADD > 25) | (CSQ != "LOF_HC" & CSQ != "MIS")]
+
+  ## Get rid of last exon LoFs:
+  variant.counts <- variant.counts[(CSQ == "LOF_HC" & last_exon == F & last_intron == F) | (CSQ != "LOF_HC")]
+  
+  ## Filter by gnomAD MAF:
+  variant.counts <- variant.counts[gnomadAF < 0.001]
+  
+  ## Filter by PEXT:
+  # Only filter by PEXT for allosomes -- hemizygous genes do not use PEXT
+  variant.counts <- variant.counts[((chr == "X" | chr == "Y") & PEXT >= 0) | PEXT >= 0.1]
+  
+  ## Filter by allele missingness:
+  variant.counts <- variant.counts[AN >= AP/2]
+  ###!! FILTERING !!###
+
+  return(list(variant.counts,final.samples))
+  
+}
+
+# UKBB/Hg38
+counts.file <- "rawdata/snvresources/counts.ukbb_wes.txt"
+samples.file <- "rawdata/snvresources/has_exome.txt"
+indv.to.keep <- paste0(UKBB.phenotype.data[,eid])
+
+## The weird paste is because of how sampleIDs are represented in the variants table
+data.UKBB <- load.data(counts.file,samples.file,indv.to.keep)
+variants.UKBB <- data.UKBB[[1]]
+samples.UKBB <- data.UKBB[[2]]
+rm(data.UKBB)
+
+## Translate geneIDs from Hg38 to Hg19
+variants.UKBB <- merge(variants.UKBB,gene.translate,by.x = "GENE",by.y = "hg38.GENE",all.x=T)
+variants.UKBB[,GENE:=hg19.GENE]
+variants.UKBB[,hg19.GENE:=NULL]
+
+rm(indv.to.keep, counts.file, samples.file)
+```
+
+#### Plotting Various Counts
+
+Just plotting some simple variant count diagrams for QC purposes.
+
+```{r Plotting Variant Totals, fig.height=4, fig.width=6}
+
+count.variants <- function(variant.counts,samples,af.cutoff) {
+
+  counts.AC1 <- variant.counts[UKBB.AC == 1,sum(gt),by=c("eid","CSQ")]
+  counts.AC1[,AF:="AC1"]
+  counts.AF0.1 <- variant.counts[UKBB.AF < af.cutoff,sum(gt),by=c("eid","CSQ")]
+  counts.AF0.1[,AF:="AF0.1"]
+
+  count.table <- bind_rows(counts.AC1,counts.AF0.1)
+
+  samples.table <- data.table(crossing(samples=samples[,eid],CSQ=c("LOF_HC","MIS","SYN"),AF=c("AC1","AF0.1")))
+  setnames(samples.table,"samples","eid")
+  
+  count.table <- merge(samples.table,count.table,by=c("eid","CSQ","AF"),all.x=T)
+  count.table[,V1:=ifelse(is.na(V1),0,V1)]
+  
+  setnames(count.table,"V1","count")
+  
+  return(count.table)
+  
+}
+
+UKBB.counts <- count.variants(variants.UKBB,samples.UKBB,0.001)
+UKBB.plot <- ggplot(UKBB.counts,aes(CSQ,count,colour=AF)) + geom_boxplot() + ggtitle("UKBB") + ylim(0,100) + theme.legend
+UKBB.genes <- variants.UKBB[CSQ == "SYN" & UKBB.AF<=1e-3,sum(gt),by=GENE]
+setnames(UKBB.genes,"V1","UKBB")
+
+UKBB.plot
+
+ggplot(UKBB.counts[AF=="AC1" & CSQ=="LOF_HC"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AC = 1 LoF Variants") + theme.legend
+ggplot(UKBB.counts[AF=="AC1" & CSQ=="MIS"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AC = 1 Missense Variants") + theme.legend
+ggplot(UKBB.counts[AF=="AC1" & CSQ=="SYN"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AC = 1 Synonymous Variants") + theme.legend
+
+ggplot(UKBB.counts[AF=="AF0.1" & CSQ=="LOF_HC"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AF < 0.001 LoF Variants") + theme.legend
+ggplot(UKBB.counts[AF=="AF0.1" & CSQ=="MIS"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AF < 0.001 Missense Variants") + theme.legend
+ggplot(UKBB.counts[AF=="AF0.1" & CSQ=="SYN"],aes(count,..density..)) + scale_alpha_discrete(range=c(1,0.5)) + geom_histogram(binwidth=1,position="identity") + ggtitle("AF < 0.001 Synonymous Variants") + theme.legend + xlim(0,200)
+
+rm(UKBB.plot)
+```
+
+#### Variant Totals / Individual / Gene Group
+
+This is where we make the variant count totals for each individual for the purposes of phenotype testing. We need to first remove LoF/Missense variants that are found in males as they are unlikely to be associated with phenotype. We then just count total number of variants in our gene lists from above.
+
+```{r Total Number of Variants Per Gene Category}
+
+## We need to generate a list of common LoF/Missense variants found in males as they are unlikely to relate to phenotype of interest.
+counts <- merge(variants.UKBB[CSQ == "MIS" | CSQ == "LOF_HC"],UKBB.phenotype.data[,c("eid","sexPulse")],by="eid")
+sex.counts <- counts[,sum(gt),by=c("chr","pos","sexPulse","CSQ")]
+sex.counts <- data.table(pivot_wider(sex.counts, names_from = "sexPulse", values_from="V1"))
+sex.counts[is.na(sex.counts)] <- 0
+setnames(sex.counts,c("2","1"),c("Female","Male"))
+invalid.positions <- sex.counts[Female > 0 & Male > 0, c("chr","pos")]
+
+## And count!
+get.gene.counts.snvs <- function(data, samples, maf) {
+    
+    variants <- data.table(crossing(sample_id=samples[,eid],type=c("LOF_HC","SYN","MIS")))
+    
+    ## This handles the high pLI/sHET lists:
+    for (gene.list in names(gene.lists)) {
+    
+      current.genes <- unlist(get(gene.list,gene.lists))
+      
+      ## Filter on frequency cutoff and gene list
+      if (maf == 0) {
+        counts <- data[UKBB.AC == 1 & GENE %in% current.genes & !pos %in% invalid.positions[,pos],sum(gt),by=c("eid","CSQ")]
+      } else {
+        counts <- data[UKBB.AF <= maf & GENE %in% current.genes & !pos %in% invalid.positions[,pos],sum(gt),by=c("eid","CSQ")]
+      }
+      
+      variants <- merge(variants,counts,by.x=c("sample_id","type"),by.y=c("eid","CSQ"),all.x=T)
+      variants[,V1:=if_else(is.na(V1),0L,V1)]
+      setnames(variants,"V1",gene.list)
+      
+    }
+    
+    variants[,allele.freq:=maf]
+    setcolorder(variants,c(names(variants)[-grep("type",names(variants))],c("type")))
+    return(variants)
+}
+
+snv.counts <- bind_rows(get.gene.counts.snvs(variants.UKBB,samples.UKBB,0),
+                        get.gene.counts.snvs(variants.UKBB,samples.UKBB,1e-3))
+
+```
+
+# 5. Variant Burden Impact on Traits
+
+## 5A. Function for Linear Modeling
+
+This code blob builds a function which does linear or logistic modeling for all my variant associations of the format:
+
+$ phenotype \sim n_{vars[i,v]} + age + age^2 + PC1..PC10 $
+
+Where
+
+$ s_{vars[i,v]}$
+
+is the number of variants in individual $i$ for variant class $v$, where $v$ can be PTV, Missense, or Synonymous. This block has a number of flags to handle the differing cases we test (i.e. logistic vs linear model, removing all individuals without children, etc.).
+
+```{r Linear Regression Function}
+
+run.regression <- function(maf,
+                           gene.list,
+                           y.var,
+                           variant.type) {
+ 
+  cols.to.keep <- c("sample_id",gene.list)
+  final.stats <- snv.counts[type == variant.type & allele.freq == maf,..cols.to.keep]
+  
+  if (variant.type == "LOF_HC") {
+    final.stats <- final.stats[get(gene.list) <= 3]
+  }
+  
+  final.stats <- merge(final.stats,UKBB.phenotype.data,by.x="sample_id",by.y="eid")
+  
+  ## Remove missing y.var data
+  final.stats <- final.stats[!is.na(get(y.var))]
+
+  ## Only females
+  final.stats <- final.stats[sexPulse == 2]
+  
+  covariates <- c("PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","agePulse.squared","agePulse")
+  
+  cov.string <- paste(covariates, collapse=" + ")
+  formated.formula <- as.formula(paste(y.var, cov.string,sep=" ~ "))
+  
+  test.lm <- glm(formated.formula, data=final.stats, family="gaussian")
+  resid.test <- augment(test.lm,data = final.stats) %>% data.table()
+
+  formated.formula <- as.formula(paste(".resid", gene.list, sep = " ~ "))
+  
+  test.lm <- glm(formated.formula, data=resid.test, family="gaussian")
+  coef.lm <- tidy(test.lm) %>% data.table()
+
+  total.hits <- resid.test[,sum(get(gene.list))]
+  
+  return(list(coef.lm[term==eval(gene.list),estimate],
+    coef.lm[term==eval(gene.list),std.error],
+    coef.lm[term==eval(gene.list),p.value],
+    total.hits,
+    nrow(resid.test),
+    list(resid.test)))
+  
+}
+```
+
+## 5B. Plotting Function
+
+This is a plotting function for generating a nice formated plot for initial data visualization purposes. It isn't used for any main text/supplemental data or figures.
+
+```{r Plotting Function, fig.height=7, fig.width=8}
+
+plot.result <- function(data, ymin, ymax, y.lab) {
+
+  plottable <- copy(data)
+  ## This just makes it so the labels aren't 500 miles long:
+  plottable[,gene.list.2:=factor(gene.list,
+                                 levels=sort(unique(plottable[,gene.list])),
+                                 labels=c(str_wrap(gsub("_"," ",gsub("\\."," ",sort(unique(plottable[,gene.list])))),width=20)))]
+  
+  ## Confidence Intervals and significance
+  plottable[,var.ci.upper:=var.beta + (1.96*var.stderr)]
+  plottable[,var.ci.lower:=var.beta - (1.96*var.stderr)]
+  plottable[,sig.pos:=if_else(var.beta<0,var.ci.lower-0.05,var.ci.upper+0.05)]
+
+  ylab <- "Effect Size"
+  yline <- 0
+  
+  betas <- ggplot(plottable,aes(x=gene.list.2,y=var.beta,group=interaction(variant.type,maf),colour=variant.type,linetype=as.factor(maf))) +
+    geom_hline(aes(yintercept=yline),linetype=2,colour="red") +
+    geom_point(position=position_dodge(width=1),size=4) +
+    scale_x_discrete(name="") +
+    scale_y_continuous(name=ylab,limits = c(ymin,ymax)) +
+    geom_errorbar(aes(ymin=var.ci.lower,ymax=var.ci.upper),position=position_dodge(width=1),width=0,size=2) +
+    scale_fill_manual(values = alt.colours, labels = c("PTVs","Missense","Synonymous"), name = "Variant Type") +
+    scale_color_manual(values = alt.colours, labels = c("PTVs","Missense","Synonymous"), name = "Variant Type") +
+    scale_linetype_discrete(name = "MAF Threshold") +
+    guides(fill="none") +
+    theme.legend + theme(axis.text.x = element_blank(),  legend.key=element_rect(fill="white"))
+  
+  counts <- ggplot(plottable,aes(gene.list.2,n.var,group=interaction(variant.type,maf),fill=variant.type,linetype=as.factor(maf))) +
+    geom_col(position=position_dodge(),colour="black") +
+    scale_x_discrete(name="") +
+    scale_y_log10(name=y.lab) +
+    scale_fill_manual(values = alt.colours) +
+    theme +
+    theme(axis.text.x=element_blank(), legend.key=element_rect(fill="white"))
+  
+  plot <- (counts / betas) + plot_layout(heights=c(1,3),guides = "collect")
+
+  return(plot)
+  
+}
+```
+
+## 5C. Female Carriers of Known Hemizygous DD Genes
+
+### Fertility
+
+```{r Hemizygous F Carriers X Fertility, fig.height=10, fig.width=19}
+results.hemi.fertility <- data.table(crossing(maf = c(0.001,0),
+                                              gene.list = names(gene.lists)[grep("hemizygous",names(gene.lists))],
+                                              y.var = c("live.births"),
+                                              variant.type = c("LOF_HC","SYN","MIS")))
+
+results.hemi.fertility[,c("var.beta","var.stderr","var.p","n.var","n.indvs","data"):=run.regression(maf,gene.list,y.var,variant.type),by=1:nrow(results.hemi.fertility)]
+
+plot.result(results.hemi.fertility,-2.1,1,"Number of Affected\nVariants")
+```
+
+### Cognition
+
+```{r Hemizygous F Carriers X Cognition, fig.width=14, fig.height=6}
+
+results.hemi <- data.table(crossing(maf = c(0.001,0),
+                                    gene.list = names(gene.lists)[grep("hemizygous",names(gene.lists))],
+                                    y.var = c("fluid.intel"),
+                                    variant.type = c("LOF_HC","SYN","MIS")))
+
+results.hemi[,c("var.beta","var.stderr","var.p","n.var","n.indvs"):=run.regression(maf,gene.list,y.var,variant.type),by=1:nrow(results.hemi)]
+
+plot.result(results.hemi,-1.2,1,"Number of Affected\nVariants")
+```
+
+# 6. Figures / Tables / Numbers
+
+## 6A. Plotting Hemizygous Distributions and Figure
+
+This (mostly) plots Supplementary Figure 4 -- Still need to edit a bit in Illustrator to get it looking nice for publication.
+
+```{r Supplementary Figure 4, fig.width=8, fig.height=8}
+
+plot.hemi.fertility <- plot.result(results.hemi.fertility[gene.list == "hemizygous_DD_genes_consensus"],-1.3,0.8,"# of Carriers")
+plot.hemi.cognition <- plot.result(results.hemi[gene.list == "hemizygous_DD_genes_consensus"],-1.3,0.8,"# of Carriers")
+
+plot <- plot.hemi.fertility[[1]] / (plot.hemi.cognition[[2]] + plot.hemi.fertility[[2]]) + plot_layout(nrow = 2, guides = "collect", heights = c(1,2)) + plot_annotation(tag_levels = 'A')
+
+plot
+
+ggsave("figures/UKBB_fertility.SuppFig4.svg",plot,units=c("in"),width=10,height=10)
+```
+
+## 6B. Fertility Ratio
+
+This calculates the fertility ratio as presented in the main text.
+
+```{r Fertilty Ratio}
+
+## Actual density plot
+plot.hemi <- snv.counts[allele.freq == 1e-3 & type == "LOF_HC",c("sample_id","hemizygous_DD_genes_consensus")]
+plot.hemi <- merge(plot.hemi, UKBB.phenotype.data, by.x = "sample_id", by.y = "eid")
+plot.hemi <- plot.hemi[sexPulse==2 & !is.na(live.births)]
+
+density.plot <- ggplot(plot.hemi,aes(live.births,..density..,group=as.factor(hemizygous_DD_genes_consensus),fill=as.factor(hemizygous_DD_genes_consensus))) + 
+  scale_fill_discrete(guide=guide_legend(title = "Carrier"),labels=c("FALSE","TRUE")) + 
+  geom_histogram(alpha=0.5,position="identity",bins=8) + 
+  ylab("Density") + 
+  xlab("Live Births") + 
+  theme.legend + 
+  theme(legend.position=c(0.9,0.7))
+
+density.plot
+
+## Plot Mean Fertility for carrier vs. non carriers
+means <- plot.hemi[,list(mean(live.births),sd(`live.births`),median(`live.births`)),by="hemizygous_DD_genes_consensus"]
+setnames(means,c("V1","V2","V3"),c("mean","sd","median"))
+
+means.plot <- ggplot(means,aes(as.factor(hemizygous_DD_genes_consensus),mean)) + 
+  geom_point(size=3) + 
+  geom_errorbar(aes(ymin=mean-sd,ymax=mean+sd),width=0.1,size=1) +
+  geom_text(aes(y=mean,label=paste0(sprintf("%0.3f",mean),"μ ± ",sprintf("%0.3f",sd), "s.d.")),size=6,position=position_nudge(.2,0)) +
+  coord_flip() +
+  scale_x_discrete(name="Carrier of Variant in a\nKnown Hemizygous DD Gene",labels=c("False","True")) +
+  scale_y_continuous("Mean ± SD Children Per Female") +
+  theme +
+  theme(panel.grid.major.y=element_blank())
+
+means.plot
+
+## Now calculate a fertility ratio corrected for age/PCs
+result.residuals <- results.hemi.fertility[maf == 1e-3 & gene.list == "hemizygous_DD_genes_consensus" & variant.type == "LOF_HC",data][[1]]
+result.residuals[,corrected:=`.resid` - min(result.residuals[,`.resid`])]
+mean.resids <- result.residuals[,list(mean(corrected),sd(corrected),median(corrected)),by="hemizygous_DD_genes_consensus"]
+setnames(mean.resids,c("V1","V2","V3"),c("mean","sd","median"))
+
+formated.formula <- as.formula(paste("corrected",paste0("as.factor(hemizygous_DD_genes_consensus)"),sep=" ~ "))
+ratio.test <- ttestratio(formated.formula,data=result.residuals,base=1)
+
+paste0("Fertility Ratio ", sprintf("%0.3f",ratio.test$estimate[[3]])," [", sprintf("%0.3f",ratio.test$conf.int[1]),"-", sprintf("%0.3f",ratio.test$conf.int[2]), "]", " (p = ",sprintf("%0.3f",ratio.test$p.value),")")
+paste0("Number of Carriers : ", nrow(plot.hemi[hemizygous_DD_genes_consensus > 0]))
+paste0("Fertility of Carriers : ", sprintf("%0.2f",plot.hemi[hemizygous_DD_genes_consensus > 0, mean(live.births)]))
+paste0("Fertility of Non-Carriers : ", sprintf("%0.2f",plot.hemi[hemizygous_DD_genes_consensus == 0, mean(live.births)]))
+```
+
+## 6C. Supplemental Table of Variants
+
+This generates an unformated version of Supplementary Table 4. We added in the name of the gene manually after printing this table based on ENSG ID.
+
+```{r Supplemental Table 4}
+
+supp.table.xx <- variants.UKBB[eid %in% plot.hemi[hemizygous_DD_genes_consensus > 0, sample_id] & CSQ == "LOF_HC" & GENE %in% unlist(gene.lists["hemizygous_DD_genes_consensus"])]
+
+supp.table.xx <- supp.table.xx[,c("pos","ref","alt","GENE","CADD","UKBB.AC")]
+setnames(supp.table.xx, names(supp.table.xx), c("position","ref. allele","alt. allele","ENSEMBL Gene ID", "CADDv1.5", "Allele Count"))
+
+write.table(supp.table.xx,"Figures/UKBB_fertility.SuppTable4.txt",row.names = F, col.names = T, sep = "\t", quote = F)
+```

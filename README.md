@@ -43,3 +43,6 @@ Note that the boostrapping results will be slightly different to those reported 
 ####
 7. script7.compare_PRS_between_patient_subsets_for_chrX_paper.R    : This script compares polygenic scores between different groups of male probands. It produces Supplementary Table 6.
 
+# UK Biobank Analysis
+
+We have provided a separate directory and RMarkdown document which contains the code used for all analysis with UK Biobank data. Please see `./UKBB_XAnalysis/XChromosomeFertility.Rmd` for more information. This document is intended to be loaded into RStudio to replicate our results.
